@@ -1,0 +1,27 @@
+# Visual Studio cache / user settings
+.vs/
+*.user
+*.suo
+*.VC.db
+*.VC.opendb
+
+# Build output
+x64/
+x86/
+[Dd]ebug/
+[Rr]elease/
+
+# Build artifacts
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.dll
+
+# NuGet (in case it's ever re-added)
+packages/
+*.nupkg
+
+# Logs
+*.log
