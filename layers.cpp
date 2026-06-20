@@ -88,6 +88,15 @@ static bool         g_nvmlOk = false;
 static DWORD        g_lastPoll = 0;
 static unsigned int g_cachedUtil = 0, g_cachedTemp = 0;
 
+// FPS graph
+static int   cfgGraphOn = 1;
+static int   cfgGraphSeconds = 30;
+static int   cfgGraphH = 110;          // graph height in texture pixels
+static float cfgGraphMax = 100.0f;     // FPS at top of graph (0 = auto-scale)
+static std::vector<float> g_hist;
+static int   g_histN = 0, g_histPos = 0, g_histCount = 0;
+static HPEN  g_penGraph = nullptr, g_penAxis = nullptr;
+
 static void InitNvml() {
     g_nvml = LoadLibraryA("nvml.dll");
     if (!g_nvml) g_nvml = LoadLibraryA("C:\\Program Files\\NVIDIA Corporation\\NVSMI\\nvml.dll");
@@ -163,6 +172,10 @@ static void LoadConfig() {
     cfgBgR = IniI(ini, "BgR", cfgBgR); cfgBgG = IniI(ini, "BgG", cfgBgG); cfgBgB = IniI(ini, "BgB", cfgBgB); cfgBgA = IniI(ini, "BgAlpha", cfgBgA);
     cfgTR = IniI(ini, "TextR", cfgTR); cfgTG = IniI(ini, "TextG", cfgTG); cfgTB = IniI(ini, "TextB", cfgTB);
     cfgFontSize = IniI(ini, "FontSize", cfgFontSize);
+    cfgGraphOn = IniI(ini, "Graph", cfgGraphOn);
+    cfgGraphSeconds = IniI(ini, "GraphSeconds", cfgGraphSeconds);
+    cfgGraphH = IniI(ini, "GraphHeight", cfgGraphH);
+    cfgGraphMax = IniF(ini, "GraphMaxFps", cfgGraphMax);
     GetPrivateProfileStringA("Overlay", "FontName", cfgFontName, cfgFontName, sizeof cfgFontName, ini);
     GetPrivateProfileStringA("Overlay", "Lock", cfgLock, cfgLock, sizeof cfgLock, ini);
     cfgRefreshMs = IniI(ini, "RefreshMs", cfgRefreshMs);
@@ -235,6 +248,13 @@ static void InitOverlay() {
     SetTextColor(g_memDC, RGB(255, 255, 255));
     g_upload.resize((size_t)cfgTexW * cfgTexH * 4);
 
+    g_penGraph = CreatePen(PS_SOLID, 2, RGB(255, 255, 255));
+    g_penAxis = CreatePen(PS_SOLID, 1, RGB(90, 90, 90));
+    g_histN = cfgGraphSeconds * 1000 / (cfgRefreshMs > 0 ? cfgRefreshMs : 250);
+    if (g_histN < 2) g_histN = 2;
+    g_hist.assign(g_histN, 0.0f);
+    g_histPos = 0; g_histCount = 0;
+
     InitNvml();
     Log("Overlay ready: %u images, %dx%d.\n", ic, cfgTexW, cfgTexH);
     g_ready = true;
@@ -244,6 +264,10 @@ static void InitOverlay() {
 static void DrawContent() {
     memset(g_dibBits, 0, (size_t)cfgTexW * cfgTexH * 4);
 
+    int graphArea = (cfgGraphOn ? cfgGraphH : 0);
+    int textBottom = cfgTexH - graphArea;     // text lives above the graph
+
+    // ---- text ----
     SYSTEMTIME t; GetLocalTime(&t);
     char text[128];
     if (g_nvmlOk) {
@@ -261,14 +285,46 @@ static void DrawContent() {
         snprintf(text, sizeof text, "%02d:%02d:%02d\r\nGPU n/a\r\nFPS %.0f",
             t.wHour, t.wMinute, t.wSecond, g_fps);
     }
-
-    RECT calc{ 0,0,cfgTexW,cfgTexH };
+    RECT calc{ 0,0,cfgTexW,textBottom };
     DrawTextA(g_memDC, text, -1, &calc, DT_CENTER | DT_CALCRECT);
     int th = calc.bottom - calc.top;
-    RECT draw{ 0, (cfgTexH - th) / 2, cfgTexW, cfgTexH };
+    RECT draw{ 0, (textBottom - th) / 2, cfgTexW, textBottom };
     DrawTextA(g_memDC, text, -1, &draw, DT_CENTER | DT_NOCLIP);
+
+    // ---- FPS graph ----
+    if (cfgGraphOn) {
+        g_hist[g_histPos] = g_fps;                       // push newest sample
+        g_histPos = (g_histPos + 1) % g_histN;
+        if (g_histCount < g_histN) g_histCount++;
+
+        int m = 6;
+        int gx0 = m, gx1 = cfgTexW - m, gy0 = textBottom + 2, gy1 = cfgTexH - m;
+
+        HGDIOBJ ob = SelectObject(g_memDC, GetStockObject(NULL_BRUSH));
+        HGDIOBJ op = SelectObject(g_memDC, g_penAxis);
+        Rectangle(g_memDC, gx0, gy0, gx1, gy1);          // faint frame
+
+        float mx = cfgGraphMax;
+        if (mx <= 0) { mx = 1.0f; for (int k = 0; k < g_histCount; k++) if (g_hist[k] > mx) mx = g_hist[k]; }
+
+        if (g_histCount >= 2) {
+            SelectObject(g_memDC, g_penGraph);
+            int gw = gx1 - gx0, gh = gy1 - gy0;
+            for (int k = 0; k < g_histCount; k++) {
+                int idx = (g_histPos - g_histCount + k + g_histN) % g_histN;   // oldest -> newest
+                float r = g_hist[idx] / mx; if (r < 0) r = 0; if (r > 1) r = 1;
+                int x = gx0 + k * gw / (g_histCount - 1);
+                int y = gy1 - (int)(r * gh);
+                if (k == 0) MoveToEx(g_memDC, x, y, NULL); else LineTo(g_memDC, x, y);
+            }
+        }
+        SelectObject(g_memDC, op);
+        SelectObject(g_memDC, ob);
+    }
+
     GdiFlush();
 
+    // ---- composite to premultiplied-alpha upload buffer ----
     const uint8_t* src = (const uint8_t*)g_dibBits;
     uint8_t* dst = g_upload.data();
     float bgA = cfgBgA / 255.0f;
